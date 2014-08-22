@@ -14,6 +14,11 @@ cgmanager = bus.get_object("org.linuxcontainers.cgmanager",
 
 
 def expand_range(intrange):
+    """
+        Takes a string representing a list of integers and integer
+        ranges and returns an expanded list of integers.
+    """
+
     result = []
     for part in intrange.split(','):
         if '-' in part:
@@ -27,6 +32,11 @@ def expand_range(intrange):
 
 
 def get_cgroup(pid, controller):
+    """
+        Takes a pid and a cgroup controller name and returns the full
+        cgroup path for that task.
+    """
+
     with open("/proc/%s/cgroup" % pid, "r") as fd:
         for line in fd:
             fields = line.split(":")
@@ -35,17 +45,23 @@ def get_cgroup(pid, controller):
 
 
 def get_cpuinfo():
+    """
+        Generates a new /proc/cpuinfo
+    """
+
     uid, gid, pid = fuse.fuse_get_context()
 
+    # Grab the current global values
     with open("/proc/cpuinfo", "r") as fd:
         cpus = fd.read().split("\n\n")
 
+    # Grab the current cgroup values
     value = cgmanager.GetValue("cpuset",
                                get_cgroup(pid, "cpuset"),
                                "cpuset.cpus")
 
+    # Generate the new cpuinfo
     entries = []
-
     count = 0
     for i in expand_range(value):
         entries.append(cpus[i].replace("processor\t: %s" % i,
@@ -56,8 +72,13 @@ def get_cpuinfo():
 
 
 def get_meminfo():
+    """
+        Generates a new /proc/meminfo
+    """
+
     uid, gid, pid = fuse.fuse_get_context()
 
+    # Grab the current global values
     meminfo = []
     with open("/proc/meminfo", "r") as fd:
         for line in fd:
@@ -73,17 +94,45 @@ def get_meminfo():
 
             meminfo.append((key, value, unit))
 
+    # Grab the current cgroup values
+    cgroup = get_cgroup(pid, "memory")
+
+    cgm = {}
+    cgm['limit_in_bytes'] = int(cgmanager.GetValue("memory", cgroup,
+                                                   "memory.limit_in_bytes"))
+    cgm['usage_in_bytes'] = int(cgmanager.GetValue("memory", cgroup,
+                                                   "memory.usage_in_bytes"))
+
+    cgm_stat = cgmanager.GetValue("memory", cgroup, "memory.stat")
+    cgm['stat'] = {}
+    for line in cgm_stat.split("\n"):
+        fields = line.split()
+        cgm['stat'][fields[0].strip()] = fields[1].strip()
+
     # Update the values
+    meminfo_dict = {}
     for i in range(len(meminfo)):
         key, value, unit = meminfo[i]
         if key == "MemTotal":
-            cgm_value = cgmanager.GetValue("memory",
-                                           get_cgroup(pid, "memory"),
-                                           "memory.limit_in_bytes")
-            if int(cgm_value) < value * 1024:
-                value = int(cgm_value) / 1024
-                meminfo[i] = (key, value, unit)
+            if cgm['limit_in_bytes'] < value * 1024:
+                value = cgm['limit_in_bytes'] / 1024
 
+        elif key == "MemFree":
+            value = meminfo_dict['MemTotal'] - cgm['usage_in_bytes'] / 1024
+
+        elif key == "MemAvailable":
+            value = meminfo_dict['MemFree']
+
+        elif key == "Cached":
+            value = int(cgm['stat']['total_cache']) / 1024
+
+        elif key in ("Buffers", "SwapCached"):
+            value = 0
+
+        meminfo[i] = (key, value, unit)
+        meminfo_dict[key] = value
+
+    # Generate the new meminfo file
     output = ""
     for key, value, unit in meminfo:
         if unit:
@@ -97,8 +146,40 @@ def get_meminfo():
     return output
 
 
+def get_stat():
+    """
+        Generates a new /proc/stat
+    """
+
+    uid, gid, pid = fuse.fuse_get_context()
+
+    value = expand_range(cgmanager.GetValue("cpuset",
+                                            get_cgroup(pid, "cpuset"),
+                                            "cpuset.cpus"))
+
+    output = ""
+    count = 0
+    with open("/proc/stat", "r") as fd:
+        for line in fd:
+            if line.startswith("cpu") and not line.startswith("cpu "):
+                for cpu in value:
+                    if not line.startswith("cpu%s" % cpu):
+                        continue
+
+                    line = line.replace("cpu%s" % cpu, "cpu%s" % count)
+                    count += 1
+                    break
+                else:
+                    continue
+            output += line
+
+    return output
+
+
+# List of supported files with their callback function
 files = {'/cpuinfo': get_cpuinfo,
-         '/meminfo': get_meminfo}
+         '/meminfo': get_meminfo,
+         '/stat': get_stat}
 
 
 class LXCFuse(fuse.LoggingMixIn, fuse.Operations):
@@ -138,4 +219,5 @@ class LXCFuse(fuse.LoggingMixIn, fuse.Operations):
         return buf
 
 
-server = fuse.FUSE(LXCFuse(), sys.argv[1], foreground=True)
+server = fuse.FUSE(LXCFuse(), sys.argv[1], allow_other=True,
+                   foreground=True)
