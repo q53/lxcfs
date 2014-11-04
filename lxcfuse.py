@@ -3,7 +3,9 @@
 import dbus
 import errno
 import fuse
+import os
 import stat
+import time
 import sys
 
 
@@ -176,10 +178,31 @@ def get_stat():
     return output
 
 
+def get_uptime():
+    """
+        Generates a new /proc/uptime
+    """
+
+    uid, gid, pid = fuse.fuse_get_context()
+
+    value = cgmanager.GetTasks("cpuset",
+                               get_cgroup(pid, "cpuset"))
+
+    uptime = os.stat("/proc/%s" % sorted(value)[0]).st_ctime
+
+    output = ""
+    with open("/proc/uptime", "r") as fd:
+        fields = fd.read().split()
+        fields[0] = str(round(time.time() - uptime, 2))
+
+    return "%s\n" % " ".join(fields)
+
+
 # List of supported files with their callback function
 files = {'/cpuinfo': get_cpuinfo,
          '/meminfo': get_meminfo,
-         '/stat': get_stat}
+         '/stat': get_stat,
+         '/uptime': get_uptime}
 
 
 class LXCFuse(fuse.LoggingMixIn, fuse.Operations):
