@@ -1,5 +1,4 @@
 #!/usr/bin/python
-
 import dbus
 import errno
 import fuse
@@ -13,6 +12,7 @@ bus = dbus.connection.Connection("unix:path=/sys/fs/cgroup/cgmanager/sock")
 
 cgmanager = bus.get_object("org.linuxcontainers.cgmanager",
                            "/org/linuxcontainers/cgmanager")
+controllers = [str(entry) for entry in cgmanager.ListControllers()]
 
 
 def expand_range(intrange):
@@ -188,21 +188,54 @@ def get_uptime():
     value = cgmanager.GetTasks("cpuset",
                                get_cgroup(pid, "cpuset"))
 
-    uptime = os.stat("/proc/%s" % sorted(value)[0]).st_ctime
+    oldest_pid = sorted([os.stat("/proc/%s" % entry).st_ctime
+                         for entry in value])[0]
 
-    output = ""
     with open("/proc/uptime", "r") as fd:
         fields = fd.read().split()
-        fields[0] = str(round(time.time() - uptime, 2))
+        fields[0] = str(round(time.time() - oldest_pid, 2))
 
     return "%s\n" % " ".join(fields)
 
 
+def list_cgroup_entries(controller, path):
+    """
+        List the directory entries for a given cgroup path.
+    """
+
+    cg_path = "/%s" % "/".join(path)
+
+    entries = [{'path': ".",
+                'type': stat.S_IFDIR,
+                'mode': 0o755,
+                'uid': 0,
+                'gid': 0},
+               {'path': "..",
+                'type': stat.S_IFDIR,
+                'mode': 0o755,
+                'uid': 0,
+                'gid': 0}]
+
+    entries += [{'path': str(entry[0]),
+                 'type': stat.S_IFREG,
+                 'uid': entry[1],
+                 'gid': entry[2],
+                 'mode': entry[3]}
+                for entry in cgmanager.ListKeys(controller, cg_path)]
+    entries += [{'path': str(entry),
+                 'type': stat.S_IFDIR,
+                 'mode': 0o755,
+                 'uid': 0,
+                 'gid': 0}
+                for entry in cgmanager.ListChildren(controller, cg_path)]
+    return entries
+
+
 # List of supported files with their callback function
-files = {'/cpuinfo': get_cpuinfo,
-         '/meminfo': get_meminfo,
-         '/stat': get_stat,
-         '/uptime': get_uptime}
+files = {'/proc/cpuinfo': get_cpuinfo,
+         '/proc/meminfo': get_meminfo,
+         '/proc/stat': get_stat,
+         '/proc/uptime': get_uptime}
 
 
 class LXCFuse(fuse.LoggingMixIn, fuse.Operations):
@@ -211,8 +244,45 @@ class LXCFuse(fuse.LoggingMixIn, fuse.Operations):
 
     def getattr(self, path, fh=None):
         st = {}
+        st['st_atime'] = time.time()
+        st['st_ctime'] = time.time()
+        st['st_mtime'] = time.time()
 
-        if path == '/':
+        if path == "/":
+            st['st_mode'] = stat.S_IFDIR | 0o755
+            st['st_nlink'] = 2
+        elif path == "/cgroup":
+            st['st_mode'] = stat.S_IFDIR | 0o755
+            st['st_nlink'] = 2
+        elif path.startswith("/cgroup/"):
+            parts = path.split("/")
+            if len(parts) < 3:
+                raise fuse.FuseOSError(errno.ENOENT)
+            elif len(parts) == 3 and parts[2] in controllers:
+                st['st_mode'] = stat.S_IFDIR | 0o755
+                st['st_nlink'] = 2
+            else:
+                entries = list_cgroup_entries(parts[2], parts[3:-1])
+                match = [entry for entry in entries
+                         if entry['path'] == os.path.basename(path)]
+                if not match:
+                    raise fuse.FuseOSError(errno.ENOENT)
+
+                if match[0]['type'] == stat.S_IFDIR:
+                    st['st_nlink'] = 2
+                else:
+                    st['st_nlink'] = 1
+                st['st_mode'] = match[0]['type'] | match[0]['mode']
+                st['st_uid'] = match[0]['uid']
+                st['st_gid'] = match[0]['gid']
+
+                if match[0]['type'] == stat.S_IFREG \
+                        and parts[-1] not in ("cgroup.event_control",):
+                    cg_path = "/%s" % "/".join(parts[3:-1])
+                    st['st_size'] = len(cgmanager.GetValue(parts[2],
+                                                           cg_path,
+                                                           parts[-1])) + 1
+        elif path == "/proc":
             st['st_mode'] = stat.S_IFDIR | 0o755
             st['st_nlink'] = 2
         elif path in files:
@@ -224,13 +294,39 @@ class LXCFuse(fuse.LoggingMixIn, fuse.Operations):
         return st
 
     def readdir(self, path, fh):
-        return ['.', '..'] + ["".join(entry[1:]) for entry in files.keys()]
-
-    def read(self, path, size, offset, fh):
-        if path not in files:
+        if path == "/":
+            return ['.', '..', 'proc', 'cgroup']
+        elif path == "/cgroup":
+            return [".", ".."] + controllers
+        elif path.startswith("/cgroup/"):
+            parts = path.split("/")
+            if parts[2] not in controllers:
+                raise fuse.FuseOSError(errno.ENOENT)
+            return [entry['path']
+                    for entry in list_cgroup_entries(parts[2], parts[3:])]
+        elif path == "/proc":
+            return ['.', '..'] + [os.path.basename(entry)
+                                  for entry in files.keys()
+                                  if entry.startswith("/proc/")]
+        else:
             raise fuse.FuseOSError(errno.ENOENT)
 
-        content = files[path]()
+    def read(self, path, size, offset, fh):
+        if path in files:
+            content = files[path]()
+        elif path.startswith("/cgroup/"):
+            parts = path.split("/")
+            entries = list_cgroup_entries(parts[2], parts[3:-1])
+            match = [entry for entry in entries
+                     if entry['path'] == os.path.basename(path)]
+            if not match:
+                raise fuse.FuseOSError(errno.ENOENT)
+
+            cg_path = "/%s" % "/".join(parts[3:-1])
+            content = str(cgmanager.GetValue(parts[2], cg_path, parts[-1]))
+            content += "\n"
+        else:
+            raise fuse.FuseOSError(errno.ENOENT)
 
         slen = len(content)
         if offset < slen:
