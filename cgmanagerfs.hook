@@ -11,3 +11,10 @@ if [ -d /sys/fs/cgroup/cgmanager ]; then
     mount --bind /sys/fs/cgroup/cgmanager \
         ${LXC_ROOTFS_MOUNT}/sys/fs/cgroup/cgmanager
 fi
+
+if [ -d /var/lib/cgmanagerfs/cgroup ]; then
+    for entry in /var/lib/cgmanagerfs/cgroup/*; do
+        mkdir ${LXC_ROOTFS_MOUNT}/sys/fs/cgroup/$(basename $entry)
+        mount --bind $entry ${LXC_ROOTFS_MOUNT}/sys/fs/cgroup/$(basename $entry)
+    done
+fi
