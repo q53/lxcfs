@@ -1,13 +1,15 @@
+Simple python implementation of fuse proc for lxc containers based on earlier lxcfs.
+
 == Dependencies ==
-Python 2.7 and cgmanager >= 0.33
+Python 2.7
 
 == How to use ==
-As root, do:
- - mkdir -p /var/lib/cgmanagerfs
- - ./cgmanagerfs /var/lib/cgmanagerfs/ -o allow_other -o allow_root
+Targeted to use on RHEL 7x and derivatives:
+make archive && rpmbuild -ta pylxcfs-*tar.bz2 && rpm -ivh ~/rpmbuild/RPMS/noarch/pylxcfs-*noarch.rpm
+systemctl enable pylxcfs.service
+systemctl start pylxcfs
 
 In your container config, add:
- - lxc.hook.mount = /path/to/the/branch/cgmanagerfs.hook
+ - lxc.hook.mount = /usr/share/lxc/hooks/pylxcfs.hook
 
-Then start your container and you should see a bunch of bind-mounts for
-all the relevant paths of cgmanagerfs.
+
