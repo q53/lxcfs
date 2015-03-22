@@ -1,0 +1,16 @@
+[Unit]
+Description=pylxcfs server daemon
+After=syslog.target local-fs.target
+
+[Service]
+EnvironmentFile=/etc/sysconfig/pylxcfs
+ExecStart=/usr/sbin/pylxcfs $OPTIONS
+KillMode=process
+Restart=on-failure
+RestartSec=42s
+StandardOutput=syslog
+StandardError=syslog
+
+[Install]
+WantedBy=multi-user.target
+

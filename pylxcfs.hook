@@ -1,0 +1,10 @@
+#!/bin/sh
+
+PYLXCFUSEDIR=${PYLXCFUSEDIR:-/var/lib/pylxcfs}
+
+if [ -d $PYLXCFUSEDIR/proc ]; then
+   for entry in $PYLXCFUSEDIR/proc/*; do
+       mount -n --bind $entry ${LXC_ROOTFS_MOUNT}/proc/$(basename $entry)
+   done
+fi
+
